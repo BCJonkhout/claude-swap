@@ -5842,9 +5842,6 @@ class ClaudeAccountSwitcher:
                 markers += f" {bold_accent('(active)')}"
             if self._disabled_from_data(seq_data, str(num)):
                 markers += f" {muted('(disabled)')}"
-            priority = self._policy_from_data(seq_data, str(num)).priority
-            if priority:
-                markers += f" {muted(f'(priority {priority})')}"
             print(f"  {num}: {label} {muted(f'[{tag}]')}{markers}")
             for line in _usage_entry_lines(entries[str(num)]):
                 print(f"     {line}")

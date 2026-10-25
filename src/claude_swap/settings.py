@@ -131,7 +131,7 @@ SETTING_SPECS: dict[str, SettingSpec] = {
             help="Switch when the 5h window (or any window, if no weekly line) reaches this pct",
         ),
         SettingSpec(
-            "autoswitch", "weeklyThreshold", "weekly_threshold", "float", 50.0, 100.0,
+            "autoswitch", "weeklyThreshold", "weekly_threshold", "float", 50.0, 99.9,
             help="Switch line for the 7d and per-model windows (unset: threshold)",
         ),
         SettingSpec(

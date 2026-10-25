@@ -802,7 +802,7 @@ Defaults live in settings.json in the backup root; flags override them.
         metavar="PCT",
         help=(
             "Separate switch line for the 7-day and per-model weekly windows "
-            "(50-100; default: the threshold). A flag cannot unset a "
+            "(50-99.9; default: the threshold). A flag cannot unset a "
             "configured value; use 'cswap config unset'"
         ),
     )

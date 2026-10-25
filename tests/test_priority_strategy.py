@@ -6,7 +6,6 @@ from unittest.mock import patch
 import pytest
 
 from claude_swap.autoswitch import NoSwitchEvent, SwitchEvent, TickOutcome
-from claude_swap.json_output import account_row
 from claude_swap.models import AccountPolicy, normalize_account_priority
 from claude_swap.settings import load_settings, set_setting
 from claude_swap.switcher import ClaudeAccountSwitcher
@@ -18,7 +17,7 @@ from tests.test_autoswitch import EngineHarness, _entry_for, _iso_at, _usage7
 def fleet(temp_home, **settings):
     h = EngineHarness(temp_home, **{
         "strategy": "priority-consume-first", "threshold": 90,
-        "weekly_threshold": 100, "cooldown_seconds": 0, **settings,
+        "weekly_threshold": 99.9, "cooldown_seconds": 0, **settings,
     })
     for num in range(1, 5):
         h.seed(num, f"account-{num}@example.test")
@@ -100,15 +99,15 @@ def test_multiple_priority_tiers_and_near_line_target(temp_home):
 
 def test_weekly_exhausted_primary_and_fallback_are_skipped(temp_home):
     h = fleet(temp_home)
-    values = usage(h, pcts=(90, 0, 0, 0), weekly=(60, 100, 99.99, 100))
+    values = usage(h, pcts=(90, 0, 0, 0), weekly=(60, 100, 99.8, 100))
     assert h.tick_with_usage(values) is TickOutcome.SWITCHED
     assert h.active_number() == 3
 
 
-@pytest.mark.parametrize("weekly_line", [95, 100])
-def test_weekly_line_alone_switches_with_zero_five_hour_usage(temp_home, weekly_line):
+@pytest.mark.parametrize("weekly_line,pct", [(95, 95), (99.9, 99.9), (99.9, 100)])
+def test_weekly_line_alone_switches_with_zero_five_hour_usage(temp_home, weekly_line, pct):
     h = fleet(temp_home, weekly_threshold=weekly_line)
-    values = usage(h, pcts=(0, 0, 0, 0), weekly=(weekly_line, 70, 50, 40))
+    values = usage(h, pcts=(0, 0, 0, 0), weekly=(pct, 70, 50, 40))
     assert h.tick_with_usage(values) is TickOutcome.SWITCHED
     assert h.active_number() == 2
 
@@ -279,14 +278,12 @@ def test_priority_validation_and_corrupt_read_fallback(invalid):
     assert policy == AccountPolicy(threshold=85, priority=0)
 
 
-def test_priority_json_is_additive_and_weekly_100_is_configurable(tmp_path):
-    base = account_row(1, "a@example.test", "", "", False, None)
-    assert "priority" not in base
-    assert account_row(1, "a@example.test", "", "", False, None,
-                       policy=AccountPolicy(priority=20)) == {**base, "priority": 20}
+def test_priority_strategy_uses_existing_configurable_cutoffs(tmp_path):
     set_setting(tmp_path, "autoswitch.strategy", "priority-consume-first")
-    set_setting(tmp_path, "autoswitch.weeklyThreshold", "100")
+    set_setting(tmp_path, "autoswitch.threshold", "85")
+    set_setting(tmp_path, "autoswitch.weeklyThreshold", "99.9")
     settings = load_settings(tmp_path)
     assert settings.strategy == "priority-consume-first"
-    assert settings.weekly_threshold == 100
+    assert settings.threshold == 85
+    assert settings.weekly_threshold == 99.9
 

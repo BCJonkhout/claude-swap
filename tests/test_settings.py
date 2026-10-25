@@ -402,7 +402,7 @@ class TestWeeklyThreshold:
 
     @pytest.mark.parametrize(
         "raw,expected",
-        [("97", 97.0), ("100", 100.0), ("970", 100.0), ("10", 50.0), ('"banana"', None), ("null", None)],
+        [("97", 97.0), ("970", 99.9), ("10", 50.0), ('"banana"', None), ("null", None)],
     )
     def test_load_clamps_numbers_and_drops_garbage(self, tmp_path: Path, raw, expected):
         settings_path(tmp_path).write_text(
@@ -425,16 +425,16 @@ class TestWeeklyThreshold:
 
     def test_an_integer_too_large_for_a_float_still_clamps(self, tmp_path: Path):
         # Python ints are unbounded; isfinite() on one past float range raises
-        # OverflowError. Each line must still clamp to its own maximum.
+        # OverflowError. The clamp must keep answering 99.9 for both lines.
         huge = "1" + "0" * 400
         settings_path(tmp_path).write_text(
             '{"autoswitch": {"threshold": %s, "weeklyThreshold": %s}}' % (huge, huge)
         )
         loaded = load_settings(tmp_path)
-        assert (loaded.threshold, loaded.weekly_threshold) == (99.9, 100.0)
+        assert (loaded.threshold, loaded.weekly_threshold) == (99.9, 99.9)
 
     def test_set_validates_loudly_and_unset_clears(self, tmp_path: Path):
-        with pytest.raises(ConfigError, match="between 50 and 100"):
+        with pytest.raises(ConfigError, match="between 50 and 99.9"):
             set_setting(tmp_path, "autoswitch.weeklyThreshold", "970")
         with pytest.raises(ConfigError, match="expects a number.*config unset"):
             set_setting(tmp_path, "autoswitch.weeklyThreshold", "banana")
@@ -466,4 +466,4 @@ class TestWeeklyThreshold:
 
     def test_cli_value_is_clamped(self):
         merged = merged_with_cli(AutoSwitchSettings(), _args(weekly_threshold=970.0))
-        assert merged.weekly_threshold == 100.0
+        assert merged.weekly_threshold == 99.9

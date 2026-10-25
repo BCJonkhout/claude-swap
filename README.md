@@ -128,7 +128,7 @@ Setting priorities alone does not enable the strategy; `best`, `consume-first`,
 and manual switching keep their existing behavior.
 
 For example, drain two work accounts to 90% of their five-hour windows before
-using personal accounts, while allowing each weekly window to run to its limit:
+using personal accounts, with a separate weekly cutoff of 99.9%:
 
 ```bash
 cswap priority work-one@example.com 100
@@ -136,16 +136,16 @@ cswap priority work-two@example.com 100
 # All other accounts default to priority 0.
 cswap config set autoswitch.strategy priority-consume-first
 cswap config set autoswitch.threshold 90
-cswap config set autoswitch.weeklyThreshold 100
+cswap config set autoswitch.weeklyThreshold 99.9
 cswap config set autoswitch.cooldownSeconds 0
 cswap auto --once --dry-run          # preview the current decision
 cswap auto                         # keep polling and switching
 ```
 
 The same policy can be selected for a single run with
-`cswap auto --strategy priority-consume-first --threshold 90 --weekly-threshold 100 --cooldown 0`.
+`cswap auto --strategy priority-consume-first --threshold 90 --weekly-threshold 99.9 --cooldown 0`.
 Run `cswap priority` to inspect tiers, or `cswap priority 2 --unset` to return an
-account to tier 0. Priorities also appear in `list`, `list --json`, and the TUI.
+account to tier 0.
 
 The engine first excludes disabled, quarantined, unreadable, and exhausted
 accounts, and accounts **at or above any of their switch lines**. Among usable
