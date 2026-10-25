@@ -25,6 +25,7 @@ from claude_swap.fsutil import atomic_write_text, publish_target
 
 SETTINGS_SCHEMA_VERSION = 1
 SETTINGS_FILENAME = "settings.json"
+AUTOSWITCH_STRATEGIES = ("best", "consume-first", "priority-consume-first")
 
 _logger = logging.getLogger("claude-swap")
 
@@ -57,7 +58,7 @@ class AutoSwitchSettings:
     interval_seconds: float = 60.0
     cooldown_seconds: float = 300.0
     hysteresis_pct: float = 10.0
-    strategy: str = "best"  # "best" (most headroom) or "consume-first" (soonest weekly reset)
+    strategy: str = "best"  # Opt-in alternatives are in AUTOSWITCH_STRATEGIES.
     include_api_key_accounts: bool = False
     unhealthy_ticks: int = 3
     # Comma-separated model display name(s) (e.g. "Fable" or "Fable,Opus"),
@@ -130,7 +131,7 @@ SETTING_SPECS: dict[str, SettingSpec] = {
             help="Switch when the 5h window (or any window, if no weekly line) reaches this pct",
         ),
         SettingSpec(
-            "autoswitch", "weeklyThreshold", "weekly_threshold", "float", 50.0, 99.9,
+            "autoswitch", "weeklyThreshold", "weekly_threshold", "float", 50.0, 100.0,
             help="Switch line for the 7d and per-model windows (unset: threshold)",
         ),
         SettingSpec(
@@ -147,7 +148,7 @@ SETTING_SPECS: dict[str, SettingSpec] = {
         ),
         SettingSpec(
             "autoswitch", "strategy", "strategy", "choice",
-            choices=("best", "consume-first"),
+            choices=AUTOSWITCH_STRATEGIES,
             help="How auto-switch picks the target account",
         ),
         SettingSpec(

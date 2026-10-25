@@ -278,13 +278,12 @@ class TestConfigMisc:
 
 
 class TestWeeklyThresholdConfig:
-    """`autoswitch.weeklyThreshold`: an optional float with the threshold's
-    bounds — loud on `set`, clearable with `unset`, null in JSON."""
+    """Optional weekly float through 100, clearable with unset, null in JSON."""
 
     def test_out_of_range_and_garbage_exit_1(self, temp_home, capsys):
         code, _, err = _run(["set", "autoswitch.weeklyThreshold", "970"], capsys)
         assert code == 1
-        assert "between 50 and 99.9" in err
+        assert "between 50 and 100" in err
         code, _, err = _run(["set", "autoswitch.weeklyThreshold", "banana"], capsys)
         assert code == 1
         assert "expects a number" in err

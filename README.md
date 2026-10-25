@@ -92,6 +92,7 @@ cswap auto --model Fable       # also switch when the Fable weekly limit is hit
 cswap auto --once              # single check-and-switch, for cron/scripts
 cswap auto --dry-run           # log what it would do, never switch
 cswap auto --strategy consume-first   # burn the soonest-resetting account first
+cswap auto --strategy priority-consume-first # priority tiers, then soonest weekly reset
 ```
 
 <details>
@@ -116,6 +117,58 @@ For cron/systemd timers, `--once` reports the outcome in its exit code (`0` swit
 ```
 
 Defaults like the threshold and cooldown are configurable with `cswap config set autoswitch.threshold 80` — flags override them (see [Configuration](#configuration)).
+
+#### Optional account priority tiers
+
+Use `priority-consume-first` when some accounts should always be used before
+others. Assign each account a tier with `cswap priority <num|email|alias> <tier>`:
+higher numbers go first, accounts without a priority have tier **0**, and valid
+tiers are integers from **0 to 1000**. You can use as many tiers as you need.
+Setting priorities alone does not enable the strategy; `best`, `consume-first`,
+and manual switching keep their existing behavior.
+
+For example, drain two work accounts to 90% of their five-hour windows before
+using personal accounts, while allowing each weekly window to run to its limit:
+
+```bash
+cswap priority work-one@example.com 100
+cswap priority work-two@example.com 100
+# All other accounts default to priority 0.
+cswap config set autoswitch.strategy priority-consume-first
+cswap config set autoswitch.threshold 90
+cswap config set autoswitch.weeklyThreshold 100
+cswap config set autoswitch.cooldownSeconds 0
+cswap auto --once --dry-run          # preview the current decision
+cswap auto                         # keep polling and switching
+```
+
+The same policy can be selected for a single run with
+`cswap auto --strategy priority-consume-first --threshold 90 --weekly-threshold 100 --cooldown 0`.
+Run `cswap priority` to inspect tiers, or `cswap priority 2 --unset` to return an
+account to tier 0. Priorities also appear in `list`, `list --json`, and the TUI.
+
+The engine first excludes disabled, quarantined, unreadable, and exhausted
+accounts, and accounts **at or above any of their switch lines**. Among usable
+accounts it chooses the highest tier, then the earliest account-wide weekly
+reset. When a higher tier recovers, it takes over on the next successful usage
+check, even if the lower tier still has quota. Equal tiers and equal reset times
+keep the active account; unknown reset times sort last within their tier.
+Per-account thresholds and optional `--model` weekly windows still apply.
+
+Unlike the other strategies, this strategy never relaxes the landing thresholds
+when all accounts are above their lines, including during hard-limit or unhealthy
+account failover. It reports a blocked decision and keeps polling. It cannot pause
+Claude Code or cancel an in-flight request, so polling and usage-reporting delays
+can overshoot the switch line. No account is automatically disabled by resting it.
+
+The configured cooldown still applies to proactive moves, including returning
+to a recovered tier; `--cooldown 0` removes that delay. The percentage hysteresis
+margin used by `best` does not apply: eligibility, tier/reset ordering, stable
+ties, and a fresh usage check before activation govern this strategy. API-key
+accounts remain an explicitly enabled last resort, outside the quota tiers.
+
+To stop using priority tiers, select another strategy, for example
+`cswap config set autoswitch.strategy best`, and restart a running auto loop.
 
 </details>
 
