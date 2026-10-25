@@ -105,6 +105,14 @@ def test_weekly_exhausted_primary_and_fallback_are_skipped(temp_home):
     assert h.active_number() == 3
 
 
+@pytest.mark.parametrize("weekly_line", [95, 100])
+def test_weekly_line_alone_switches_with_zero_five_hour_usage(temp_home, weekly_line):
+    h = fleet(temp_home, weekly_threshold=weekly_line)
+    values = usage(h, pcts=(0, 0, 0, 0), weekly=(weekly_line, 70, 50, 40))
+    assert h.tick_with_usage(values) is TickOutcome.SWITCHED
+    assert h.active_number() == 2
+
+
 def test_custom_weekly_and_per_account_thresholds_are_respected(temp_home):
     h = fleet(temp_home, weekly_threshold=95)
     h.switcher.set_account_threshold("2", 80)
