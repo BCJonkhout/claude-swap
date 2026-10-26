@@ -15,6 +15,7 @@ from claude_swap.models import (
     ACCOUNT_PRIORITY_MAX,
     ACCOUNT_THRESHOLD_MAX,
     ACCOUNT_THRESHOLD_MIN,
+    Platform,
 )
 from claude_swap.printer import (
     accent,
@@ -25,7 +26,12 @@ from claude_swap.printer import (
     muted,
     warning,
 )
-from claude_swap.settings import AUTOSWITCH_STRATEGIES, load_ui_settings, load_update_settings
+from claude_swap.settings import (
+    AUTOSWITCH_STRATEGIES,
+    load_run_settings,
+    load_ui_settings,
+    load_update_settings,
+)
 from claude_swap.switcher import ClaudeAccountSwitcher
 
 
@@ -161,13 +167,14 @@ Examples:
     parser.add_argument(
         "--share-history",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=None,
         help=(
             "Share conversation history (projects/ and history.jsonl) from "
             "~/.claude into the session profile, so every account sees one "
             "unified history. History the profile already accumulated is "
             "merged into ~/.claude first. --no-share-history restores "
-            "per-account history (the default). Not supported on Windows."
+            "per-account history (the default, unless `cswap config set "
+            "run.shareHistory true`). Not supported on Windows."
         ),
     )
     parser.add_argument(
@@ -199,7 +206,7 @@ Examples:
                 args.account,
                 tail,
                 share=not args.no_share,
-                share_history=args.share_history,
+                share_history=_resolve_share_history(args, switcher),
                 require_session=args.require_session,
             )
             return  # only reachable in tests where exec/exit is mocked
@@ -211,7 +218,7 @@ Examples:
                 slot,
                 tail,
                 share=not args.no_share,
-                share_history=args.share_history,
+                share_history=_resolve_share_history(args, switcher),
                 require_session=args.require_session,
             )
             return  # only reachable in tests
@@ -234,6 +241,26 @@ Examples:
     except KeyboardInterrupt:
         print(f"\n{dimmed('Operation cancelled')}")
         sys.exit(130)
+
+
+def _resolve_share_history(args: argparse.Namespace, switcher) -> bool:
+    """The flag wins; otherwise run.shareHistory, which Windows can't honor.
+
+    An explicit --share-history still reaches SessionManager.run and errors
+    there; a setting-derived one just warns and falls back to per-account
+    history. Only called on account-targeting paths, so a bare unmapped run
+    (plain claude) stays silent.
+    """
+    if args.share_history is not None:
+        return args.share_history
+    enabled = load_run_settings(switcher.backup_dir).share_history
+    if enabled and switcher.platform == Platform.WINDOWS:
+        warning(
+            "run.shareHistory is not supported on Windows yet — "
+            "using per-account history."
+        )
+        return False
+    return enabled
 
 
 def _guard_root(switcher: ClaudeAccountSwitcher) -> None:
