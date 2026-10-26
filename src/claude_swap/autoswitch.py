@@ -54,6 +54,7 @@ from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.json_output import SCHEMA_VERSION, USAGE_TOKEN_EXPIRED
 from claude_swap.lines import BindingWindow, binding_window, window_line
 from claude_swap.locking import FileLock
+from claude_swap.models import AccountPolicy
 from claude_swap.poll_policy import (
     ESCALATION_MARGIN_PCT,
     RESET_SLACK_S,
@@ -404,7 +405,7 @@ class PollEvent(AutoSwitchEvent):
 @dataclass(frozen=True)
 class SwitchEvent(AutoSwitchEvent):
     kind: ClassVar[str] = "switch"
-    trigger: str  # "proactive" | "at-limit" | "failover" | "consume-first"
+    trigger: str  # "proactive" | "at-limit" | "failover" | "consume-first" | "priority"
     from_ref: dict | None
     to_ref: dict | None
     warnings: list[str] = field(default_factory=list)
@@ -983,7 +984,8 @@ class AutoSwitchEngine:
             return TickOutcome.ERROR
 
     def _resolve_thresholds(
-        self, settings: AutoSwitchSettings | None = None
+        self, settings: AutoSwitchSettings | None = None,
+        *, policies: Mapping[str, AccountPolicy] | None = None,
     ) -> ThresholdMap:
         """The effective threshold for every account, resolved once per tick.
 
@@ -997,10 +999,12 @@ class AutoSwitchEngine:
         snapshot it gates with, even if ``apply_threshold()`` lands mid-tick.
         """
         effective = settings or self.settings
+        if policies is None:
+            policies = self.switcher.account_policies()
         return ThresholdMap(
             {
                 num: policy.threshold
-                for num, policy in self.switcher.account_policies().items()
+                for num, policy in policies.items()
                 if policy.threshold is not None
             },
             effective.threshold,
@@ -1122,6 +1126,7 @@ class AutoSwitchEngine:
         self._blocked_wait_long = False
         self._idle_hold_slow = False
         settings = self.settings
+        priority_mode = settings.strategy == "priority-consume-first"
         state = self._read_state()
         if not self.dry_run:
             # Dry-run must not write anything, so recovered quarantines are
@@ -1177,7 +1182,8 @@ class AutoSwitchEngine:
         # Every gate below reads `thresholds[...]`; the map is total, so an
         # account absent from it (never sequenced, just removed) reads the
         # global rather than raising mid-tick.
-        thresholds = self._resolve_thresholds(settings)
+        policies = self.switcher.account_policies()
+        thresholds = self._resolve_thresholds(settings, policies=policies)
         # Cadence follows the same snapshot, and does so BEFORE collection is
         # planned below — see `_refresh_poll_policy_inputs`.
         self._refresh_poll_policy_inputs(thresholds)
@@ -1243,7 +1249,7 @@ class AutoSwitchEngine:
                 else (100.0 - active_headroom) < thresholds[current]
             )
             if below:
-                if settings.strategy != "consume-first":
+                if settings.strategy != "consume-first" and not priority_mode:
                     self._emit(
                         NoSwitchEvent(
                             reason="below-threshold",
@@ -1261,7 +1267,7 @@ class AutoSwitchEngine:
                 # whichever account's weekly window resets soonest, to burn the
                 # most-perishable quota first. Candidate selection decides whether
                 # a sooner-resetting account with room actually exists.
-                trigger = "consume-first"
+                trigger = "priority" if priority_mode else "consume-first"
             else:
                 # Exhaustion is physical: at-limit reads the raw headroom.
                 trigger = "at-limit" if active_headroom <= 0 else "proactive"
@@ -1313,14 +1319,15 @@ class AutoSwitchEngine:
                 return TickOutcome.NO_ACTION
             trigger = "failover"
 
-        if trigger in ("proactive", "consume-first") and self._in_cooldown(state):
+        if trigger in ("proactive", "consume-first", "priority") and self._in_cooldown(state):
             self._emit(NoSwitchEvent(reason="cooldown"))
             return TickOutcome.NO_ACTION
 
         # -- candidate selection ------------------------------------------
+        switchable = self.switcher.switchable_account_numbers()
         candidates = [
             num
-            for num in self.switcher.switchable_account_numbers()
+            for num in switchable
             if num != current and num not in quarantined
         ]
         oauth_candidates = [
@@ -1336,7 +1343,7 @@ class AutoSwitchEngine:
             else []
         )
         if (
-            trigger == "consume-first"
+            trigger in ("consume-first", "priority")
             and not oauth_candidates
             and active_headroom is not None
         ):
@@ -1408,6 +1415,18 @@ class AutoSwitchEngine:
             Cheap: the retry runs only when the barred list came back empty,
             which is the tick that was about to do nothing anyway.
             """
+            if priority_mode:
+                # Strict landing and a stable priority/reset ordering make the
+                # legacy escape/no-return heuristics unnecessary. A recovered
+                # higher tier must be able to reclaim work immediately after
+                # the configured cooldown, even when it is the account we left.
+                return self._rank_priority_candidates(
+                    oauth_candidates=kw["oauth_candidates"],
+                    usage=kw["usage"], headroom=kw["headroom"],
+                    current=current, active_enabled=current in switchable,
+                    settings=settings, now=kw["now"], thresholds=thresholds,
+                    policies=policies,
+                )
             # Recomputed per snapshot, never once per tick: the consume-first
             # two-phase commit replaces `headroom` and `active_headroom` and
             # re-ranks, and the ratio release consumes exactly those two
@@ -1456,7 +1475,7 @@ class AutoSwitchEngine:
             thresholds=thresholds,
         )
 
-        if trigger == "consume-first" and ordered:
+        if (trigger == "consume-first" or priority_mode) and ordered:
             # Two-phase commit: the provisional pick may have ridden a
             # snapshot up to CANDIDATE_MAX_INTERVAL_S stale — consume-first
             # decides below the threshold, where the collector only escalates
@@ -1488,13 +1507,32 @@ class AutoSwitchEngine:
                 thresholds=thresholds,
             )
 
-        if not ordered and api_key_candidates and trigger != "consume-first":
+        priority_active_ready = priority_mode and current in switchable and self._priority_ready(
+            usage.get(current), headroom.get(current), settings, thresholds[current]
+        )
+        if (
+            not ordered and api_key_candidates
+            and trigger not in ("consume-first", "priority")
+            and not priority_active_ready
+        ):
             # Last resort when we must move: metered API-key accounts
             # (unmeasurable headroom). Never for a below-threshold consume-first
             # nudge — those API-key accounts have no weekly window to consume.
             ordered = api_key_candidates
 
         if not ordered:
+            if priority_active_ready:
+                self._emit(NoSwitchEvent(
+                    reason="already-consuming-priority",
+                    detail="no usable account has higher priority or an earlier weekly reset in this tier",
+                ))
+                return TickOutcome.NO_ACTION
+            if priority_mode:
+                self._emit(NoSwitchEvent(
+                    reason="no-qualifying-candidate",
+                    detail="no candidate is below every switch line with readable usage; waiting for recovery",
+                ))
+                return TickOutcome.BLOCKED
             if not any_known:
                 # No candidate readable this tick — true for every strategy,
                 # and must not be dressed up as a consume-first hold.
@@ -1591,12 +1629,15 @@ class AutoSwitchEngine:
         systemic = ""
         for num in ordered:
             email = self.switcher.account_email(num)
-            if trigger == "consume-first":
+            if trigger == "consume-first" or (priority_mode and num in oauth_candidates):
                 # The phase-2 refetch is best-effort: the collector refuses
                 # accounts in failure backoff or claimed by a concurrent
                 # poller, which then serve their stored entries. Consume-first
                 # is opportunistic, not an escape — never act on stale data
                 # or slide to a worse-ranked target; hold and retry next tick.
+                # Priority rotation also requires fresh target data for escapes,
+                # but an unusable active account must not be stranded by one
+                # stale candidate when a lower-ranked fresh target can take over.
                 entry = entries.get(num)
                 if entry is None or not entry.fresh(self.clock()):
                     self._emit(
@@ -1609,6 +1650,8 @@ class AutoSwitchEngine:
                             ),
                         )
                     )
+                    if priority_mode and not priority_active_ready:
+                        continue
                     return TickOutcome.NO_ACTION
             if self.dry_run:
                 # Dry-run stops at the decision: no token refresh, no
@@ -2077,6 +2120,55 @@ class AutoSwitchEngine:
             < was - RECOVERY_HYSTERESIS_S
         )
 
+    def _priority_ready(
+        self, value: dict | str | None, headroom: float | None,
+        settings: AutoSwitchSettings, threshold: float,
+    ) -> bool:
+        """Priority rotation never lands at or above any configured line."""
+        binding = self._binding(value, settings, threshold)
+        return (
+            headroom is not None and headroom > 0
+            and binding is not None and not binding.over
+        )
+
+    def _rank_priority_candidates(
+        self, *, oauth_candidates: list[str],
+        usage: dict[str, dict | str | None], headroom: dict[str, float | None],
+        current: str, active_enabled: bool, settings: AutoSwitchSettings,
+        now: float, thresholds: Mapping[str, float],
+        policies: Mapping[str, AccountPolicy],
+    ) -> tuple[list[str], bool, float | None]:
+        """Highest usable tier, then earliest weekly reset, with stable ties.
+
+        Pure snapshot ranking, also used after the pre-switch refresh. Unknown
+        reset times sort last within a tier; an eligible active account wins
+        equal keys, so changing usage alone cannot cause ping-pong. Unlike the
+        existing strategies, even at-limit/failover never selects an account
+        at its switch line. Priorities do not bypass eligibility checks.
+        """
+        def key(num: str) -> tuple[int, float]:
+            reset = _seven_day_reset_ts(usage.get(num), now)
+            return (-policies.get(num, AccountPolicy()).priority,
+                    reset if reset is not None else float("inf"))
+
+        active_key = (
+            key(current)
+            if active_enabled and self._priority_ready(
+                usage.get(current), headroom.get(current), settings, thresholds[current]
+            ) else None
+        )
+        ordered = [
+            num for num in oauth_candidates
+            if self._priority_ready(usage.get(num), headroom.get(num), settings, thresholds[num])
+            and (active_key is None or key(num) < active_key)
+        ]
+        ordered.sort(key=key)  # Sequence order breaks candidate ties.
+        return (
+            ordered,
+            any(headroom.get(num) is not None for num in oauth_candidates),
+            _seven_day_reset_ts(usage.get(current), now),
+        )
+
     def _rank_candidates(
         self,
         *,
@@ -2511,7 +2603,7 @@ class AutoSwitchEngine:
         # state lock.
         with self._state_lock():
             state = self._read_state()
-            if trigger in ("proactive", "consume-first") and self._in_cooldown(state):
+            if trigger in ("proactive", "consume-first", "priority") and self._in_cooldown(state):
                 self._emit(NoSwitchEvent(reason="cooldown"))
                 return TickOutcome.NO_ACTION
 
