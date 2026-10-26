@@ -1636,7 +1636,8 @@ class AutoSwitchEngine:
                 # is opportunistic, not an escape — never act on stale data
                 # or slide to a worse-ranked target; hold and retry next tick.
                 # Priority rotation also requires fresh target data for escapes,
-                # since its thresholds remain strict under every trigger.
+                # but an unusable active account must not be stranded by one
+                # stale candidate when a lower-ranked fresh target can take over.
                 entry = entries.get(num)
                 if entry is None or not entry.fresh(self.clock()):
                     self._emit(
@@ -1649,11 +1650,9 @@ class AutoSwitchEngine:
                             ),
                         )
                     )
-                    return (
-                        TickOutcome.BLOCKED
-                        if priority_mode and not priority_active_ready
-                        else TickOutcome.NO_ACTION
-                    )
+                    if priority_mode and not priority_active_ready:
+                        continue
+                    return TickOutcome.NO_ACTION
             if self.dry_run:
                 # Dry-run stops at the decision: no token refresh, no
                 # quarantine writes — freshening is a mutation.

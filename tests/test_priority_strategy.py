@@ -5,7 +5,12 @@ from unittest.mock import patch
 
 import pytest
 
-from claude_swap.autoswitch import NoSwitchEvent, SwitchEvent, TickOutcome
+from claude_swap.autoswitch import (
+    NoSwitchEvent,
+    SwitchEvent,
+    TickOutcome,
+    _headroom_by_account,
+)
 from claude_swap.models import AccountPolicy, normalize_account_priority
 from claude_swap.settings import load_settings, set_setting
 from claude_swap.switcher import ClaudeAccountSwitcher
@@ -212,6 +217,113 @@ def test_stale_priority_target_never_activates(temp_home, active_pct, expected):
     assert h.tick_with_entries(entries) is expected
     assert h.active_number() == 1
     assert any(isinstance(e, NoSwitchEvent) and e.reason == "stale-usage" for e in h.events)
+
+
+@pytest.mark.parametrize("departure", ["five-hour", "hard-limit", "weekly", "override", "model", "failover"])
+@pytest.mark.parametrize("stale_targets,expected_target", [(("2",), 4), (("2", "4"), 3)])
+def test_required_priority_move_skips_stale_targets(
+    temp_home, departure, stale_targets, expected_target,
+):
+    h = fleet(temp_home, unhealthy_ticks=1, model="Fable")
+    h.switcher.set_account_priority("2", 200)
+    values = usage(h, pcts=(0, 10, 30, 40))
+    if departure == "five-hour":
+        values["1"]["five_hour"]["pct"] = 90
+    elif departure == "hard-limit":
+        values["1"]["five_hour"]["pct"] = 100
+    elif departure == "weekly":
+        values["1"]["seven_day"]["pct"] = 99.9
+    elif departure == "override":
+        h.switcher.set_account_threshold("1", 80)
+        values["1"]["five_hour"]["pct"] = 80
+    elif departure == "model":
+        values["1"]["scoped"] = [{"name": "Fable", "pct": 99.9}]
+    else:
+        values["1"] = None
+    entries = {n: _entry_for(v, h.clock.now) for n, v in values.items()}
+    for num in stale_targets:
+        entries[num] = UsageEntry(
+            last_good=values[num], fetched_at=h.clock.now - 600,
+            age_s=600, trust_extended=True,
+        )
+    with patch.object(h.engine, "_freshen_target", return_value="ok") as freshen:
+        assert h.tick_with_entries(entries) is TickOutcome.SWITCHED
+    assert h.active_number() == expected_target
+    freshen.assert_called_once_with(str(expected_target), f"account-{expected_target}@example.test")
+    switch = next(e for e in h.events if isinstance(e, SwitchEvent))
+    assert switch.trigger == (
+        "failover" if departure == "failover"
+        else "at-limit" if departure == "hard-limit" else "proactive"
+    )
+
+
+def test_opportunistic_priority_move_holds_for_stale_top_target(temp_home):
+    h = fleet(temp_home)
+    h.switcher.set_account_priority("2", 300)
+    h.switcher.set_account_priority("3", 200)
+    values = usage(h)
+    entries = {n: _entry_for(v, h.clock.now) for n, v in values.items()}
+    entries["2"] = UsageEntry(
+        last_good=values["2"], fetched_at=h.clock.now - 600,
+        age_s=600, trust_extended=True,
+    )
+    with patch.object(h.engine, "_freshen_target") as freshen:
+        assert h.tick_with_entries(entries) is TickOutcome.NO_ACTION
+    assert h.active_number() == 1
+    freshen.assert_not_called()
+    assert not any(isinstance(e, SwitchEvent) for e in h.events)
+    assert any(isinstance(e, NoSwitchEvent) and e.reason == "stale-usage" for e in h.events)
+
+
+@pytest.mark.parametrize("initial_pct,fresh_pct,expected", [
+    (10, 90, TickOutcome.SWITCHED),
+    (90, 10, TickOutcome.NO_ACTION),
+    (None, 10, TickOutcome.NO_ACTION),
+])
+def test_stale_target_skip_uses_refreshed_active_eligibility(
+    temp_home, initial_pct, fresh_pct, expected,
+):
+    h = fleet(temp_home, unhealthy_ticks=1)
+    h.switcher.set_account_priority("2", 200)
+    initial = usage(h)
+    if initial_pct is None:
+        initial["1"] = None
+    else:
+        initial["1"]["five_hour"]["pct"] = initial_pct
+    initial_entries = {n: _entry_for(v, h.clock.now) for n, v in initial.items()}
+    fresh = usage(h, pcts=(fresh_pct, 10, 10, 10))
+    fresh_entries = {n: _entry_for(v, h.clock.now) for n, v in fresh.items()}
+    fresh_entries["2"] = UsageEntry(
+        last_good=fresh["2"], fetched_at=h.clock.now - 600,
+        age_s=600, trust_extended=True,
+    )
+    with patch.object(h.engine, "_collect_scheduled_usage", return_value=(
+        initial_entries, initial, _headroom_by_account(initial, h.engine._models),
+    )), patch.object(h.switcher, "usage_entries_by_account", return_value=fresh_entries):
+        assert h.engine.tick() is expected
+    assert h.active_number() == (4 if expected is TickOutcome.SWITCHED else 1)
+
+
+def test_required_priority_move_skips_stale_targets_in_dry_run(temp_home):
+    h = fleet(temp_home)
+    h.engine.dry_run = True
+    h.switcher.set_account_priority("2", 200)
+    values = usage(h, pcts=(100, 10, 30, 40))
+    entries = {n: _entry_for(v, h.clock.now) for n, v in values.items()}
+    for num in ("2", "4"):
+        entries[num] = UsageEntry(
+            last_good=values[num], fetched_at=h.clock.now - 600,
+            age_s=600, trust_extended=True,
+        )
+    before = h.switcher.sequence_file.read_bytes()
+    with patch.object(h.engine, "_freshen_target") as freshen:
+        assert h.tick_with_entries(entries) is TickOutcome.SWITCHED
+    freshen.assert_not_called()
+    assert h.switcher.sequence_file.read_bytes() == before
+    assert not h.engine.state_path.exists()
+    switch = next(e for e in h.events if isinstance(e, SwitchEvent))
+    assert switch.dry_run
+    assert switch.to_ref["number"] == 3
 
 
 def test_dry_run_reports_without_changing_login_or_state(temp_home):

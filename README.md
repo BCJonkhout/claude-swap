@@ -167,6 +167,11 @@ margin used by `best` does not apply: eligibility, tier/reset ordering, stable
 ties, and a fresh usage check before activation govern this strategy. API-key
 accounts remain an explicitly enabled last resort, outside the quota tiers.
 
+Stale targets are never activated. When the active account reaches a cutoff or
+needs failover, stale candidates are skipped so another fresh account below every
+line can take over. While the active account remains usable, a stale top candidate
+holds an optional priority move until a later tick.
+
 To stop using priority tiers, select another strategy, for example
 `cswap config set autoswitch.strategy best`, and restart a running auto loop.
 
