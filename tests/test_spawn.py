@@ -43,9 +43,10 @@ def darwin(monkeypatch):
 class TestDecision:
     def test_bare_name_is_resolved_and_spawned_without_fork(self, darwin, recorder):
         spawn.run(ARGV, capture_output=True, text=True, timeout=5)
+        # the hit is handed over in absolute form (a drive is prepended on Windows)
         assert recorder == [
             (
-                ["/bin/ps", "-o", "pid=", "-p", "1234"],
+                [os.path.abspath("/bin/ps"), "-o", "pid=", "-p", "1234"],
                 {"capture_output": True, "text": True, "timeout": 5, "close_fds": False},
             )
         ]
