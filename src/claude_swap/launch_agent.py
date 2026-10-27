@@ -34,6 +34,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 from claude_swap.exceptions import ClaudeSwitchError
@@ -45,6 +46,13 @@ LABEL = "com.cswap.menubar"
 # menu bar shells out to detect running sessions, so seed a PATH that finds it.
 _EXTRA_PATH_DIRS = ("~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin")
 _BASE_PATH_DIRS = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
+
+# launchd does not inherit the installing shell's environment, so a user behind
+# a proxy would get an agent that dials direct. Forward only these, never all.
+_FORWARDED_ENV_KEYS = (
+    "https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY",
+    "no_proxy", "NO_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR",
+)
 
 # `launchctl bootout` can return before launchd has finished tearing the
 # job down, and a `bootstrap` inside that window fails with "Operation
@@ -125,6 +133,7 @@ def build_plist(
     program: list[str] | None = None,
     label: str = LABEL,
     home: Path | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> bytes:
     """Serialize the LaunchAgent plist.
 
@@ -133,6 +142,8 @@ def build_plist(
     """
     program = program or resolve_program()
     out_log, err_log = log_paths(label, home)
+    env = os.environ if env is None else env
+    forwarded = {k: env[k] for k in _FORWARDED_ENV_KEYS if env.get(k)}
     return plistlib.dumps(
         {
             "Label": label,
@@ -146,7 +157,7 @@ def build_plist(
             # A menu bar owner is a UI process; Background would have launchd
             # apply throttled I/O and CPU bands to it.
             "ProcessType": "Interactive",
-            "EnvironmentVariables": {"PATH": _path_env(program)},
+            "EnvironmentVariables": {"PATH": _path_env(program), **forwarded},
             "StandardOutPath": str(out_log),
             "StandardErrorPath": str(err_log),
         }

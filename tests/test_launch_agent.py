@@ -107,6 +107,34 @@ def test_build_plist_path_env_keeps_the_launchd_defaults(tmp_path):
     assert {"/usr/bin", "/bin", "/usr/sbin", "/sbin"} <= set(entries)
 
 
+def test_build_plist_forwards_only_the_proxy_and_cert_allowlist(tmp_path):
+    # launchd does not inherit the installing shell's environment, so a proxy
+    # set there never reaches the agent. Copy a fixed allowlist, not everything.
+    env = {
+        "HTTPS_PROXY": "http://proxy.example:3128",
+        "https_proxy": "http://proxy.example:3128",
+        "NO_PROXY": "",
+        "SSL_CERT_FILE": "/etc/ssl/corp.pem",
+        "ALL_PROXY": "socks5://proxy.example:1080",
+        "AWS_SECRET_ACCESS_KEY": "hunter2",
+    }
+    parsed = plistlib.loads(launch_agent.build_plist(PROGRAM, home=tmp_path, env=env))
+    forwarded = dict(parsed["EnvironmentVariables"])
+    forwarded.pop("PATH")
+    assert forwarded == {
+        "HTTPS_PROXY": "http://proxy.example:3128",
+        "https_proxy": "http://proxy.example:3128",
+        "SSL_CERT_FILE": "/etc/ssl/corp.pem",
+    }
+
+
+def test_build_plist_env_without_allowlisted_keys_is_just_path(tmp_path):
+    parsed = plistlib.loads(
+        launch_agent.build_plist(PROGRAM, home=tmp_path, env={"HOME": "/Users/x"})
+    )
+    assert list(parsed["EnvironmentVariables"]) == ["PATH"]
+
+
 # --- program resolution ----------------------------------------------------
 
 
